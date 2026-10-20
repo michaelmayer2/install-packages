@@ -18,11 +18,16 @@ precompiled binaries instead of building from source, whenever a matching binary
 ## Usage
 
 ```sh
-Rscript install_packages.R --csv <path> [--packages] [--sysdeps] [--site-library <path>] [--snapshot <date>]
+Rscript install_packages.R (--csv <path> | --lockfile <path>) [--packages] [--sysdeps]
+                           [--site-library <path>] [--site-library-first]
+                           [--snapshot <date>] [--ppm-url <url>] [--cran-repo <name>]
+                           [--source] [--pin-pak] [--lockfile-create <path>]
 ```
 
-`--csv <path>` is the only required flag. Everything else is optional and defaults to a full
-install using PPM's rolling `latest` snapshot into R's default `site-library`.
+`--csv <path>` (or `--lockfile <path>`, see [Validated builds](#validated-builds-on-a-multi-node-setup))
+is the only required flag. Everything else is optional and defaults to a full install using PPM's
+rolling `latest` snapshot into R's default `site-library`, exactly as before the newer flags were
+added.
 
 ### CSV format
 
@@ -38,6 +43,12 @@ dplyr,1.1.4
 Package refs are built as `<package>@<version>` and passed straight to `pak`, so any version pak
 can resolve (including CRAN archive versions) works.
 
+pak does not always honour a pin. For example, a Bioconductor version that is not available for the
+running R version (such as a development-series version) is silently replaced by another one. After
+installing, the script therefore compares every installed version with its pin and prints a
+`WARNING:` line on stderr for any difference. The exit status is unchanged, so existing builds keep
+working; `--lockfile-create` treats such a difference as an error.
+
 ### Flags
 
 | Flag | Value | Effect |
@@ -47,6 +58,13 @@ can resolve (including CRAN archive versions) works.
 | `--sysdeps` | flag | On its own (i.e. **without** `--packages`), only computes and runs the system-dependency installation commands for the CSV's packages — no R packages are installed. Combined with `--packages`, it's a no-op distinction: you still get the full install described above. |
 | `--site-library <path>` | optional | Install into `<path>` instead of R's default `site-library` (`R.home()/site-library`). The path must already exist — the script errors out rather than creating it. The path is also registered in `Rprofile.site` so future R sessions on this installation pick it up automatically via `.libPaths()`. |
 | `--snapshot <date>` | optional, default `latest` | Pin the PPM CRAN/Bioconductor snapshot to a specific `YYYY-MM-DD` date instead of the rolling `latest`, for reproducible builds. |
+| `--site-library-first` | flag | Register the `--site-library` path at the **front** of `.libPaths()` instead of the end, so its packages take precedence over the user library and R's default `site-library`. Use this for a validated library that must not be shadowed. |
+| `--ppm-url <url>` | optional, default `https://p3m.dev` | The Posit Package Manager server to use, e.g. your organisation's own instance. |
+| `--cran-repo <name>` | optional, default `cran` | The CRAN-type repository on that server, e.g. a curated repository. |
+| `--source` | flag | Install R packages **from source** only, never binaries: the repository URL has no `__linux__/<distro>` segment and pak is restricted to source packages (`PKG_PLATFORMS=source`). pak itself may still be a binary, because it is the installer, not part of the installed library. |
+| `--pin-pak` | flag | Install pak from the dated `--snapshot` (instead of the rolling `r-lib.github.io` stable build), so the installer's own version is pinned too. Requires a dated `--snapshot`. |
+| `--lockfile-create <path>` | optional | Resolve the CSV's packages and all their dependencies and write a pak lockfile to `<path>`. **Nothing is installed and the R installation is not modified.** Requires a dated `--snapshot`. |
+| `--lockfile <path>` | optional | Use a pak lockfile instead of a CSV: install exactly the packages, versions and URLs it records, or, with `--sysdeps` alone, run exactly the system-requirement commands it records. Mutually exclusive with `--csv`. |
 
 #### Mode summary
 
@@ -56,6 +74,9 @@ can resolve (including CRAN archive versions) works.
 | `--packages` | Same as above. |
 | `--packages --sysdeps` | Same as above. |
 | `--sysdeps` (no `--packages`) | System dependencies only — no R packages installed. |
+| `--lockfile-create <path>` | Write a lockfile for the CSV; nothing installed, installation not modified. |
+| `--lockfile <path>` | Full install from the lockfile (packages + system deps). |
+| `--lockfile <path> --sysdeps` | System dependencies recorded in the lockfile only — no R packages installed. |
 
 ### `--site-library <path>`
 
@@ -132,10 +153,63 @@ RUN /opt/R/$R_VERSION/bin/Rscript /tmp/install_packages.R --csv /tmp/packages.cs
 RUN /opt/R/$R_VERSION/bin/Rscript /tmp/install_packages.R --csv /tmp/packages.csv --packages --site-library /opt/site-library
 ```
 
+## Validated builds on a multi-node setup
+
+For a regulated (GxP) environment, for example a load-balanced Posit Workbench or Connect cluster,
+the validated package library usually lives **once** on a shared file system, while every node
+needs the **same system libraries** installed locally. The newer flags support this workflow:
+
+1. **Create the lockfile once** per baseline release, from source, against a dated snapshot. Review
+   it and keep it under change control alongside `packages.csv`:
+
+   ```sh
+   Rscript install_packages.R --csv packages.csv --snapshot 2026-10-01 --source --pin-pak \
+     --lockfile-create pkg.lock
+   ```
+
+2. **Build node** (one node): install exactly what the lockfile records, from source, into a
+   versioned directory on the shared file system, registered at the front of `.libPaths()`. As
+   root, pak also installs the recorded system dependencies on this node:
+
+   ```sh
+   mkdir -p /shared/R/validated/4.6.1/2026-10
+   Rscript install_packages.R --lockfile pkg.lock --source --pin-pak --snapshot 2026-10-01 \
+     --site-library /shared/R/validated/4.6.1/2026-10 --site-library-first
+   ```
+
+3. **Every other node**: install only the system dependencies recorded in the same lockfile, and
+   register the shared library. No R packages are installed:
+
+   ```sh
+   Rscript install_packages.R --lockfile pkg.lock --sysdeps --source --snapshot 2026-10-01 \
+     --site-library /shared/R/validated/4.6.1/2026-10 --site-library-first
+   ```
+
+Things to know:
+
+- **Checksums.** For each package, the lockfile records its download URL and, for packages that
+  are current at the snapshot date, a SHA-256 checksum. A version pinned *older* than the snapshot's
+  current one comes from the CRAN archive, which has no checksums; `--lockfile-create` lists any
+  such packages. Pick a snapshot date at which your pinned versions are current to get checksums
+  for all of them. (Pins that *are* current are resolved through the regular index for this
+  reason; the script then verifies that every pin is in the lockfile exactly as written.)
+- **Keep the nodes identical at the OS level.** Packages are compiled once, on the build node,
+  against its system libraries. Even from the same base image, installing system dependencies on
+  the build node can pull in newer patch levels of shared libraries than the other nodes have,
+  until step 3 runs there. Run step 3 on every node, and compare installed system packages across
+  nodes (e.g. `rpm -qa` / `dpkg -l`) as part of your installation checks.
+- **One directory per baseline.** A new baseline goes into a new directory; the previous one stays
+  available for re-running earlier analyses.
+- **pak's lock files.** pak leaves empty install lock files in `<library>/_cache`; the script
+  removes that folder after a successful install, so the library contains only packages.
+
 ## Exit behavior
 
 The script exits non-zero with a message on stderr for any expected failure: missing/unrecognized
 flags, a nonexistent CSV or `--site-library` path, a missing `site-library`, a CSV missing required
-columns, or a CSV row missing a pinned version. Failures from `pak` itself (a package that can't be
+columns, a CSV row missing a pinned version, a missing lockfile, conflicting flags (`--csv` with
+`--lockfile`, or `--lockfile` with `--lockfile-create`), an invalid `--snapshot`, `--lockfile-create`
+or `--pin-pak` with the rolling `latest` snapshot, or a lockfile that does not contain a pinned
+version. Failures from `pak` itself (a package that can't be
 resolved, a failed system-dependency command, etc.) propagate as normal R errors, which `Rscript`
 already turns into a non-zero exit.
