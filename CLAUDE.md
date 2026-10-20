@@ -35,17 +35,27 @@ than assuming success from a clean build.
 
 `install_packages.R` runs top-to-bottom as a single script, in this order:
 
-1. **CLI parsing** — a hand-rolled loop over `commandArgs()` (no argparse package). Flags:
-   `--csv <path>` (required), `--packages`, `--sysdeps`, `--site-library <path>`, `--snapshot <date>`.
-   Mode resolution: `--sysdeps` present **and** `--packages` absent → `sysdeps_only`; every other
-   combination (no flags, `--packages` alone, or both together) → `full`.
+1. **CLI parsing** — a hand-rolled loop over `commandArgs()` (no argparse package). Value flags are
+   looked up in the `value_flags` map (flag → variable name); boolean flags have their own branches.
+   Flags: `--csv <path>` or `--lockfile <path>` (one is required; they are mutually exclusive),
+   `--packages`, `--sysdeps`, `--site-library <path>`, `--site-library-first`, `--snapshot <date>`,
+   `--ppm-url <url>`, `--cran-repo <name>`, `--source`, `--pin-pak`, `--lockfile-create <path>`.
+   Mode resolution: `--lockfile-create` → `lockfile_create`; else `--sysdeps` present **and**
+   `--packages` absent → `sysdeps_only`; every other combination → `full`. `--lockfile-create` and
+   `--pin-pak` refuse the rolling `latest` snapshot (a lockfile against `latest` is not reproducible).
+   **Backward compatibility is a hard requirement:** with none of the newer flags, the script must
+   behave exactly as it did before they were added (binaries, library appended last).
 2. **`site_lib` resolution** — defaults to `R.home()/site-library`, overridable via `--site-library`.
    Missing directory is a hard error (`die()`), by design — this script never creates it.
+   `lockfile_create` mode is a planning step and must **not** modify the R installation: it skips
+   the site-library check and all `Rprofile.site` writes (`modify_installation` is `FALSE`).
 3. **`write_rprofile_block()`** — a generic helper that idempotently manages named blocks inside
    `Rprofile.site` (`R.home()/etc/Rprofile.site`), delimited by `# --- BEGIN/END install_packages.R: <marker_id> ---`
    comments. Two call sites use it with different `marker_id` semantics:
    - Site-library registration: `marker_id` = the path itself, so distinct `--site-library` paths
-     persist as independent blocks (multiple site libraries can coexist across runs).
+     persist as independent blocks (multiple site libraries can coexist across runs). With
+     `--site-library-first` the block prepends instead of appends; because the marker is still the
+     path, switching between the two for the same path updates the block in place.
    - PPM/Bioconductor config: `marker_id` is a fixed string, so re-running with a different
      `--snapshot` **replaces** the previous block in place instead of duplicating or going stale.
    If you add a new persistent Rprofile.site setting, decide up front which semantics you want and
@@ -62,8 +72,16 @@ than assuming success from a clean build.
    Note: a pinned CSV version only installs as a binary if it matches whatever was "current" on
    CRAN at `--snapshot`'s date — pinning an old version against `latest` will legitimately fall
    back to a source build from the CRAN archive. That's expected PPM behavior, not a repo-config bug.
+   `--ppm-url`/`--cran-repo` replace the server and repository name. `--source` drops the
+   `__linux__/<segment>` part (source tarballs only) and sets `PKG_PLATFORMS=source` via
+   `Sys.setenv()` — an environment variable rather than an option, because pak resolves and installs
+   in a background subprocess, which inherits the environment.
 5. **pak bootstrap** — installs `pak` itself into a fixed `/tmp/pak-lib` (separate from `site_lib`,
    never mixed with user packages), then prepends that lib to `.libPaths()` *before* `library(pak)`.
+   With `--pin-pak`, pak comes from the dated snapshot instead (binary channel even with `--source`:
+   pak is the tool, not part of the installed library) into a per-snapshot `/tmp/pak-lib-<date>`,
+   so a cached pak from another snapshot is never reused. The lockfile modes also need `jsonlite`
+   to read the lockfile; it is installed into the same tool library, never into `site_lib`.
    This prepend is required, not cosmetic: pak spawns a background `callr` subprocess that resolves
    its own namespace via `.libPaths()` at spawn time, so `library(pak, lib.loc=...)` alone isn't
    enough.
@@ -75,8 +93,29 @@ than assuming success from a clean build.
    `pak::pkg_sysreqs()` and then executes the returned commands itself via `system(cmd)` (not
    `system2("sh", c("-c", cmd))` — that form silently drops everything after the first word because
    `system2` doesn't shell-quote its `args`, so the "command" arg passed to the *inner* `sh -c`
-   ends up being just the first token; this was a real, hard-to-spot bug here once).
+   ends up being just the first token; this was a real, hard-to-spot bug here once). That logic now
+   lives in `run_sysreq_commands()`, shared by both `--sysdeps` paths.
+   - With `--lockfile`, `full` calls `pak::lockfile_install()` (as root, it installs the lockfile's
+     recorded system requirements too — verified), and `sysdeps_only` runs the commands recorded in
+     the lockfile's top-level `sysreqs` entry, so every node gets exactly the build node's list.
+   - After a `full` install, `<site_lib>/_cache` is removed: pak leaves empty install lock files there.
+   - After a `full` install from a CSV, installed versions are compared with the pins (as
+     `package_version`s, because `packageVersion()` normalises `0.7-8` to `0.7.8`) and differences
+     are printed as a `WARNING:` on stderr. Deliberately not an error, to keep existing builds
+     working: e.g. the example `packages.csv` pins `rhdf5` 2.57.12, a Bioconductor version pak
+     silently replaces with 2.56.1 on R 4.6 (the original script did the same).
+   - `lockfile_create` subtlety: an explicit `pkg@version` makes pak take the package from the CRAN
+     **archive** even when that version is current in the snapshot, and archive entries have no
+     SHA-256. So pins that equal the snapshot's current version (from `available.packages()`) are
+     resolved by bare name, and the script then verifies every pin is in the lockfile as written.
 
 The `Dockerfile` is both the deployment target and the de facto test harness: it installs R via
 Posit's RPM (`cdn.posit.co/r/rhel-10/...`), then runs `install_packages.R` as the final step.
 Changing script behavior generally means rebuilding this image to verify it.
+
+For the multi-node workflow (README, "Validated builds on a multi-node setup"), the Dockerfile is not
+enough: simulate the nodes with separate `docker run --rm` containers from an R-only image, sharing
+a host directory mounted at `/shared`. Check that the build node compiles from source (`[bld][cmp]`
+in pak's output) into the shared library, that a second node in `--sysdeps` mode installs no R
+packages, and that both see the shared library first in `.libPaths()`. Note that Docker Desktop on
+macOS does not share `/tmp` with containers; use a directory under `$HOME` for the shared mount.
