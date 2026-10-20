@@ -190,9 +190,13 @@ Things to know:
 - **Checksums.** For each package, the lockfile records its download URL and, for packages that
   are current at the snapshot date, a SHA-256 checksum. A version pinned *older* than the snapshot's
   current one comes from the CRAN archive, which has no checksums; `--lockfile-create` lists any
-  such packages. Pick a snapshot date at which your pinned versions are current to get checksums
-  for all of them. (Pins that *are* current are resolved through the regular index for this
-  reason; the script then verifies that every pin is in the lockfile exactly as written.)
+  such packages. (Pins that *are* current are resolved through the regular index; the script then
+  verifies that every pin is in the lockfile exactly as written.)
+  **These checksums are those of the original CRAN tarballs.** Posit Package Manager serves its own
+  copies of the source tarballs, which are not byte-identical, so the lockfile's checksums cannot
+  verify what was downloaded from Package Manager (pak does not reject the downloads either). For
+  integrity evidence, download the tarballs from the lockfile's URLs right after the build, archive
+  them, and record their own SHA-256; verify later downloads or rebuilds against that record.
 - **Keep the nodes identical at the OS level.** Packages are compiled once, on the build node,
   against its system libraries. Even from the same base image, installing system dependencies on
   the build node can pull in newer patch levels of shared libraries than the other nodes have,
