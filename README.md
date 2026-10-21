@@ -193,10 +193,14 @@ Things to know:
   such packages. (Pins that *are* current are resolved through the regular index; the script then
   verifies that every pin is in the lockfile exactly as written.)
   **These checksums are those of the original CRAN tarballs.** Posit Package Manager serves its own
-  copies of the source tarballs, which are not byte-identical, so the lockfile's checksums cannot
+  copies of the source tarballs: in them, `DESCRIPTION` says `Repository: RSPM` instead of
+  `Repository: CRAN`, and the package's `MD5` file is updated to match. All other files are
+  identical, but the repacked tarball has a different SHA-256, so the lockfile's checksums cannot
   verify what was downloaded from Package Manager (pak does not reject the downloads either). For
   integrity evidence, download the tarballs from the lockfile's URLs right after the build, archive
-  them, and record their own SHA-256; verify later downloads or rebuilds against that record.
+  them, and record their own SHA-256; verify later downloads or rebuilds against that record. For
+  stronger evidence, compare each archived tarball file by file with the CRAN original (verified
+  against the lockfile's checksum): only the `Repository` field and `MD5` should differ.
 - **Keep the nodes identical at the OS level.** Packages are compiled once, on the build node,
   against its system libraries. Even from the same base image, installing system dependencies on
   the build node can pull in newer patch levels of shared libraries than the other nodes have,
