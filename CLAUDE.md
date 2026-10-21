@@ -49,6 +49,9 @@ than assuming success from a clean build.
    Missing directory is a hard error (`die()`), by design — this script never creates it.
    `lockfile_create` mode is a planning step and must **not** modify the R installation: it skips
    the site-library check and all `Rprofile.site` writes (`modify_installation` is `FALSE`).
+   `--no-register` suppresses only the site-library registration (`register` is `FALSE`); the
+   library must still exist for a `full` install, but a `--sysdeps`-only run that registers nothing
+   no longer requires any site library.
 3. **`write_rprofile_block()`** — a generic helper that idempotently manages named blocks inside
    `Rprofile.site` (`R.home()/etc/Rprofile.site`), delimited by `# --- BEGIN/END install_packages.R: <marker_id> ---`
    comments. Two call sites use it with different `marker_id` semantics:
