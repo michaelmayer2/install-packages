@@ -19,7 +19,7 @@ precompiled binaries instead of building from source, whenever a matching binary
 
 ```sh
 Rscript install_packages.R (--csv <path> | --lockfile <path>) [--packages] [--sysdeps]
-                           [--site-library <path>] [--site-library-first]
+                           [--site-library <path>] [--site-library-first] [--no-register]
                            [--snapshot <date>] [--ppm-url <url>] [--cran-repo <name>]
                            [--source] [--pin-pak] [--lockfile-create <path>]
 ```
@@ -59,6 +59,7 @@ working; `--lockfile-create` treats such a difference as an error.
 | `--site-library <path>` | optional | Install into `<path>` instead of R's default `site-library` (`R.home()/site-library`). The path must already exist — the script errors out rather than creating it. The path is also registered in `Rprofile.site` so future R sessions on this installation pick it up automatically via `.libPaths()`. |
 | `--snapshot <date>` | optional, default `latest` | Pin the PPM CRAN/Bioconductor snapshot to a specific `YYYY-MM-DD` date instead of the rolling `latest`, for reproducible builds. |
 | `--site-library-first` | flag | Register the `--site-library` path at the **front** of `.libPaths()` instead of the end, so its packages take precedence over the user library and R's default `site-library`. Use this for a validated library that must not be shadowed. |
+| `--no-register` | flag | Do **not** register the `--site-library` path in `Rprofile.site`. Use this for a library that should only be activated on demand, for example by a conditional block you manage yourself (see [Validated builds](#validated-builds-on-a-multi-node-setup)). With `--sysdeps` alone, no site library is needed at all. Cannot be combined with `--site-library-first`. |
 | `--ppm-url <url>` | optional, default `https://p3m.dev` | The Posit Package Manager server to use, e.g. your organisation's own instance. |
 | `--cran-repo <name>` | optional, default `cran` | The CRAN-type repository on that server, e.g. a curated repository. |
 | `--source` | flag | Install R packages **from source** only, never binaries: the repository URL has no `__linux__/<distro>` segment and pak is restricted to source packages (`PKG_PLATFORMS=source`). pak itself may still be a binary, because it is the installer, not part of the installed library. |
@@ -206,6 +207,19 @@ Things to know:
   the build node can pull in newer patch levels of shared libraries than the other nodes have,
   until step 3 runs there. Run step 3 on every node, and compare installed system packages across
   nodes (e.g. `rpm -qa` / `dpkg -l`) as part of your installation checks.
+- **Libraries activated on demand.** For an additional library that users should only see when they
+  ask for it (for example additions between baseline releases), install it with `--no-register`,
+  run the other nodes with `--sysdeps --no-register`, and add a conditional block to `Rprofile.site`
+  yourself, for example:
+
+  ```r
+  if (identical(Sys.getenv("R_PLATFORM_SLUSHY"), "true")) {
+    .libPaths(c(.libPaths(), "/shared/R/slushy/4.6.1/2026-10"))
+  }
+  ```
+
+  A project then activates it with `R_PLATFORM_SLUSHY=true` in its `.Renviron`, which R reads
+  before `Rprofile.site`.
 - **One directory per baseline.** A new baseline goes into a new directory; the previous one stays
   available for re-running earlier analyses.
 - **pak's lock files.** pak leaves empty install lock files in `<library>/_cache`; the script

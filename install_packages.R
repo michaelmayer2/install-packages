@@ -5,7 +5,7 @@
 #
 # Usage:
 #   Rscript install_packages.R (--csv <path> | --lockfile <path>) [--packages] [--sysdeps]
-#                              [--site-library <path>] [--site-library-first]
+#                              [--site-library <path>] [--site-library-first] [--no-register]
 #                              [--snapshot <date>] [--ppm-url <url>] [--cran-repo <name>]
 #                              [--source] [--pin-pak] [--lockfile-create <path>]
 #
@@ -20,6 +20,9 @@
 #                                  up via .libPaths()
 #   --site-library-first       -> register <path> at the front of .libPaths()
 #                                  (before the user and default libraries)
+#   --no-register              -> do not register --site-library in
+#                                  Rprofile.site (e.g. for a library that is
+#                                  only activated on demand)
 #   --snapshot <date>          -> pin the Posit Package Manager (PPM) CRAN/
 #                                  Bioconductor snapshot to <date> (YYYY-MM-DD)
 #                                  instead of the rolling "latest"
@@ -41,7 +44,7 @@
 usage <- function() {
   cat(paste(
     "Usage: Rscript install_packages.R (--csv <path> | --lockfile <path>) [--packages] [--sysdeps]",
-    "         [--site-library <path>] [--site-library-first] [--snapshot <date>] [--ppm-url <url>]",
+    "         [--site-library <path>] [--site-library-first] [--no-register] [--snapshot <date>] [--ppm-url <url>]",
     "         [--cran-repo <name>] [--source] [--pin-pak] [--lockfile-create <path>]\n",
     sep = "\n"
   ), file = stderr())
@@ -61,6 +64,7 @@ opt_packages <- FALSE
 opt_sysdeps <- FALSE
 opt_site_library <- NULL
 opt_site_library_first <- FALSE
+opt_no_register <- FALSE
 opt_snapshot <- "latest"
 opt_ppm_url <- "https://p3m.dev"
 opt_cran_repo <- "cran"
@@ -92,6 +96,9 @@ while (i <= length(args)) {
     i <- i + 1
   } else if (a == "--site-library-first") {
     opt_site_library_first <- TRUE
+    i <- i + 1
+  } else if (a == "--no-register") {
+    opt_no_register <- TRUE
     i <- i + 1
   } else if (a == "--source") {
     opt_source <- TRUE
@@ -133,6 +140,9 @@ if (opt_snapshot != "latest" && !grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", opt_snaps
 if (opt_snapshot == "latest" && !is.null(opt_lockfile_create)) {
   die("--lockfile-create requires a dated --snapshot (YYYY-MM-DD), not 'latest'")
 }
+if (opt_no_register && opt_site_library_first) {
+  die("--site-library-first has no effect together with --no-register")
+}
 if (opt_snapshot == "latest" && opt_pin_pak) {
   die("--pin-pak requires a dated --snapshot (YYYY-MM-DD), not 'latest'")
 }
@@ -167,13 +177,16 @@ write_rprofile_block <- function(rprofile_site, marker_id, body_lines) {
 }
 
 site_lib <- if (!is.null(opt_site_library)) opt_site_library else file.path(R.home(), "site-library")
-if (modify_installation && !dir.exists(site_lib)) {
+register <- modify_installation && !is.null(opt_site_library) && !opt_no_register
+# The library must exist where packages are installed into it, or where it is
+# registered; a --sysdeps-only run that registers nothing does not need it.
+if ((mode == "full" || register) && !dir.exists(site_lib)) {
   die(sprintf("site-library not found at %s - cannot continue.", site_lib))
 }
 
 rprofile_site <- file.path(R.home(), "etc", "Rprofile.site")
 
-if (modify_installation && !is.null(opt_site_library)) {
+if (register) {
   # Register the custom location in Rprofile.site so future R sessions on
   # this installation pick it up via .libPaths() automatically. The marker is
   # the path, so switching between first/last for the same path updates the
